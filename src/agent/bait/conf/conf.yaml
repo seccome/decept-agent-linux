@@ -1,0 +1,130 @@
+bashhistorypath: /root/.bash_history, /usr/local/timevale/.bash_history
+enabled: true
+randomline: no
+honeybits:
+  - enabled: true
+    user: licheng     
+    pass: no  
+    addr: 127.0.0.1
+    port: 3306
+    url: no
+    dbname: no
+    region: no
+    accesskeyid: no
+    secretaccesskey: no
+    remotePath: no 
+    localPath: no
+    command: no
+    htype: ssh
+  - enabled: true
+    user: licheng     
+    pass: 123456
+    addr: 127.0.0.1
+    port: 22
+    url: no
+    dbname: no
+    region: no
+    accesskeyid: no
+    secretaccesskey: no
+    remotePath: no 
+    localPath: no
+    command: no
+    htype: sshpass
+  - enabled: true
+    user: no
+    pass: no
+    addr: no
+    port: no
+    dbname: no
+    region: no
+    accesskeyid: no
+    secretaccesskey: no
+    url: http://192.168.1.66:8080/backup.zip
+    remotePath: no 
+    localPath: no
+    command: no
+    htype: wget
+  - enabled: true
+    user: backup
+    pass: b123
+    addr: 127.0.0.1
+    port: 2121
+    url: no
+    dbname: no
+    region: no
+    accesskeyid: no
+    secretaccesskey: no
+    remotePath: no 
+    localPath: no
+    command: no
+    htype: ftp
+  - enabled: true
+    user: root
+    pass: b123
+    addr: 127.0.0.1
+    port: 2222
+    url: no
+    dbname: no
+    region: no
+    accesskeyid: no
+    secretaccesskey: no
+    remotePath: /tmp/backup.tar.gz 
+    localPath: /var/db/backup.tar.gz
+    command: no
+    htype: rsync
+  - enabled: true
+    user: root
+    pass: b123
+    addr: 127.0.0.1
+    port: 2222
+    url: no
+    dbname: no
+    region: no
+    accesskeyid: no
+    secretaccesskey: no
+    remotePath: /tmp/backup.tar.gz 
+    localPath: /var/db/backup.tar.gz
+    command: no
+    htype: scp
+  - enabled: true
+    user: root
+    pass: b123
+    addr: 127.0.0.1
+    port: 3306
+    url: no
+    dbname: user
+    remotePath: no
+    localPath: no
+    region: no
+    accesskeyid: no
+    secretaccesskey: no
+    command: show databases
+    htype: mysql
+  - enabled: true
+    user: no
+    pass: no
+    addr: no
+    port: no
+    url: no
+    dbname: no
+    region: us-east-2
+    accesskeyid: AKIAIOSFODNN7EXAMPLE
+    secretaccesskey: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+    remotePath: no
+    localPath: no
+    command: no
+    htype: alibaba
+  - enabled: true
+    user: no
+    pass: no
+    addr: no
+    port: no
+    url: no
+    dbname: no
+    region: no
+    accesskeyid: no
+    secretaccesskey: no
+    remotePath: no
+    localPath: no
+    command: redis-cli -p 123456 -h 127.0.0.1, telnet 192.168.1.66 25, nano /tmp/backup/credentials.txt, redis-cli -p 12345 -h 127.0.0.1
+    htype: custom

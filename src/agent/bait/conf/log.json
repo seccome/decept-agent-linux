@@ -1,0 +1,13 @@
+{
+  "TimeFormat": "2006-01-02 15:04:05",
+  "File": {
+    "filename": "bait/log/bait.log",
+    "level": "INFO",
+    "daily": true,
+    "maxlines": 10000,
+    "maxsize": 5,
+    "maxdays": 2,
+    "append": true,
+    "permit": "0660"
+  }
+}

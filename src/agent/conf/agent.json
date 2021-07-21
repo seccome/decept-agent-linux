@@ -1,0 +1,8 @@
+{
+  "honeyPublicIp": "",
+  "strategyAddr": "127.0.0.1:6379",
+  "strategyPass": "ehoney@0571",
+  "version": "1.0",
+  "heartbeatChannel": "agent-heart-beat-channel",
+  "sshKeyUploadUrl": "http://127.0.0.1:8082/deceptdefense/api/insertsshkey?t=1622516895107"
+}
