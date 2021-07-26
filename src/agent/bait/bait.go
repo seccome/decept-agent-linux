@@ -64,92 +64,84 @@ func main() {
 				continue
 			}
 
-			var baitPolicy comm.BasePolicy
+			var taskPayload comm.TaskPayload
 
-			err = json.Unmarshal(data, &baitPolicy)
+			err = json.Unmarshal(data, &taskPayload)
 
 			if err != nil {
 				logger.Error(err)
 			}
+
 			agentId := comm.QueryEngineId()
-			/**
-			const BaitHis = "Bait_HIS" //history诱饵
-			const BaitFile = "Bait_FILE"//文件诱饵
-			const BaitUNFile = "Bait_UN_FILE"//撤回文件诱饵
-			const SignFile = "Sign_FILE" //文件密签
-			const SignUNFile = "Sign_UN_FILE"  //撤回文件密签
-			*/
 
-			if agentId == baitPolicy.AgentId {
-				if "Bait_FILE" == baitPolicy.Type || "Bait_UN_FILE" == baitPolicy.Type || "Bait_UN_HIS" == baitPolicy.Type || "Sign_FILE" == baitPolicy.Type || "Sign_UN_FILE" == baitPolicy.Type {
-					var fileBaitPolicy comm.FileBaitPolicy
+			if agentId != taskPayload.AgentID {
+				continue
+			}
+			if taskPayload.TaskType == comm.BAIT {
+				continue
+			}
 
-					err := json.Unmarshal(data, &fileBaitPolicy)
+			var baitStrategy comm.BaitStrategy
 
-					if err != nil {
-						logger.Error("json unmarshal fail %v", err)
-					}
-					handleBaitAndCallback(fileBaitPolicy, client, pool)
-				} else if "Bait_HIS" == baitPolicy.Type {
+			err = json.Unmarshal(data, &baitStrategy)
 
-					var hisBaitPolicy comm.HisBaitPolicy
+			if err != nil {
+				logger.Error(err)
+			}
 
-					decodeData, _ := base64.StdEncoding.DecodeString(baitPolicy.Data)
+			if baitStrategy.BaitType == comm.FILE_BAIT {
+				var fileBaitPolicy comm.FileBaitDeployTaskPayload
 
-					err = yaml.Unmarshal(decodeData, &hisBaitPolicy)
+				err := json.Unmarshal(data, &fileBaitPolicy)
 
-					if err != nil {
-						logger.Error("yaml unmarshal fail %v", err)
-					}
-					handleHistBaitAndCallBack(baitPolicy, hisBaitPolicy, client, pool)
-				} else {
-					logger.Error("unknown bait type [%s]", baitPolicy.Type)
+				if err != nil {
+					logger.Error("json unmarshal fail %v", err)
 				}
+				handleBaitAndCallback(fileBaitPolicy, client, pool)
+			} else if baitStrategy.BaitType == comm.HIS_BAIT {
+
+				var hisBaitPolicy comm.HistoryBaitDeployTaskPayload
+
+				err = yaml.Unmarshal(data, &hisBaitPolicy)
+
+				if err != nil {
+					logger.Error("yaml unmarshal fail %v", err)
+				}
+				handleHistBaitAndCallBack(hisBaitPolicy, client, pool)
+			} else {
+				logger.Error("unknown bait type [%s]", baitStrategy.BaitType)
 			}
 		}
 	}
 
 }
 
-func handleHistBaitAndCallBack(basePolicy comm.BasePolicy, hisBaitPolicy comm.HisBaitPolicy, redisClient *comm.RedisServer, pool *redis.Pool) {
+func handleHistBaitAndCallBack(historyBaitStrategy comm.HistoryBaitDeployTaskPayload, redisClient *comm.RedisServer, pool *redis.Pool) {
 
-	execStatus := 1
-
-	if hisBaitPolicy.Enabled == false {
-		logger.Info("His Bait Policy Is Unable")
-		execStatus = -1
-		return
-	} else {
-		for _, honeyBaits := range hisBaitPolicy.Honeybits {
-			if honeyBaits.Enabled == false {
-				continue
-			}
-			logger.Info(honeyBaits)
-			basePolicy.Status = 1
-			BashHistoryPath := strings.Split(hisBaitPolicy.BashHistoryPath, ",")
-			for _, value := range BashHistoryPath {
-				if _, err := os.Stat(value); err != nil {
-					if os.IsNotExist(err) {
-						logger.Info(value, "file does not exist")
-					} else {
-						logger.Info(value, "file err ", err)
-					}
-				} else {
-					//exist
-					honeybit_creator(honeyBaits, value, hisBaitPolicy.RandomLine)
+	for _, honeyBaits := range historyBaitStrategy.HisBaitItem {
+		if honeyBaits.Enabled == false {
+			continue
+		}
+		BashHistoryPath := strings.Split(historyBaitStrategy.BashHistoryPath, ",")
+		for _, value := range BashHistoryPath {
+			if _, err := os.Stat(value); err != nil {
+				if os.IsNotExist(err) {
+					logger.Error(value, "file does not exist", err)
 				}
+			} else {
+				//exist
+				honeybit_creator(honeyBaits, value, historyBaitStrategy.RandomLine)
 			}
 		}
-
 	}
 
-	basePolicy.Status = execStatus
-	basePolicy.Data = ""
+	historyBaitStrategy.Status = comm.SUCCESS
+	historyBaitStrategy.HisBaitItem = []comm.HisBaitItem{}
 
-	result, err := json.Marshal(basePolicy)
+	result, err := json.Marshal(historyBaitStrategy)
 
 	if err != nil {
-		logger.Error("marshal file bait policy err %v, %v", err, basePolicy)
+		logger.Error("marshal file bait policy err %v, %v", err, historyBaitStrategy)
 	}
 
 	encodedData := base64.StdEncoding.EncodeToString(result)
@@ -159,18 +151,18 @@ func handleHistBaitAndCallBack(basePolicy comm.BasePolicy, hisBaitPolicy comm.Hi
 
 }
 
-func handleBaitAndCallback(fileBaitPolicy comm.FileBaitPolicy, redisClient *comm.RedisServer, pool *redis.Pool) {
+func handleBaitAndCallback(fileBaitPolicy comm.FileBaitDeployTaskPayload, redisClient *comm.RedisServer, pool *redis.Pool) {
 
 	// 下载文件位置使用MD5
-	zipPath := fmt.Sprintf("%s%s.tar.gz", PkgPath, fileBaitPolicy.TaskId)
+	zipPath := fmt.Sprintf("%s%s.tar.gz", PkgPath, fileBaitPolicy.TaskID)
 
-	urlByte, err := base64.StdEncoding.DecodeString(fileBaitPolicy.Data)
+	urlByte, err := base64.StdEncoding.DecodeString(fileBaitPolicy.URL)
 
 	success := comm.HttpDownload(string(urlByte), zipPath)
 
 	if !success {
 		logger.Error("download file err")
-		fileBaitPolicy.Status = -1
+		fileBaitPolicy.Status = comm.FAILED
 		callBackForResult(fileBaitPolicy, redisClient, pool)
 		return
 	}
@@ -178,14 +170,14 @@ func handleBaitAndCallback(fileBaitPolicy comm.FileBaitPolicy, redisClient *comm
 	localMd5 := comm.MD5(zipPath)
 
 	// 校验
-	if localMd5 != fileBaitPolicy.Md5 {
-		logger.Error("md5 check error proxy strategy md5:%s, local md5: %s", fileBaitPolicy.Md5, localMd5)
-		fileBaitPolicy.Status = -1
+	if localMd5 != fileBaitPolicy.FileMD5 {
+		logger.Error("md5 check error proxy strategy md5:%s, local md5: %s", fileBaitPolicy.FileMD5, localMd5)
+		fileBaitPolicy.Status = comm.FAILED
 		callBackForResult(fileBaitPolicy, redisClient, pool)
 		return
 	}
 
-	dir := fmt.Sprintf("%s%s/", PkgPath, fileBaitPolicy.TaskId)
+	dir := fmt.Sprintf("%s%s/", PkgPath, fileBaitPolicy.TaskID)
 
 	logger.Info("child dir: %s", dir)
 
@@ -226,7 +218,7 @@ func handleBaitAndCallback(fileBaitPolicy comm.FileBaitPolicy, redisClient *comm
 	callBackForResult(fileBaitPolicy, redisClient, pool)
 }
 
-func callBackForResult(fileBaitPolicy comm.FileBaitPolicy, redisClient *comm.RedisServer, pool *redis.Pool) {
+func callBackForResult(fileBaitPolicy comm.FileBaitDeployTaskPayload, redisClient *comm.RedisServer, pool *redis.Pool) {
 	result, err := json.Marshal(fileBaitPolicy)
 
 	if err != nil {

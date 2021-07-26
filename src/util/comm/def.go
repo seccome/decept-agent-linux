@@ -5,11 +5,8 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"net"
 	"os"
-	"reflect"
-	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -19,40 +16,141 @@ import (
 )
 
 const (
-	HEARTBEAT            = 1000
-	POLICY               = 1001
-	ATTACK               = 1002
-	MONITOR              = 1003
-	ASSET                = 1004
-	REBOUND_SHELL_ATTACK = 1005
+	AgentTaskRequestChannel  = "agent-task-request-channel"
+	AgentTaskResponseChannel = "agent-task-response-channel"
+)
+
+//任务类型
+type TaskType string
+
+type BaitType string
+
+type TaskStatus int32
+
+type OperatorType string
+
+const (
+	PROTOCOL         TaskType = "PROTOCOL"          //协议
+	SIGNATURE        TaskType = "SIGNATURE"         //密签
+	BAIT             TaskType = "BAIT"              //诱饵
+	ProtocolProxy    TaskType = "PROTOCOL_PROXY"    //协议代理
+	TransparentProxy TaskType = "TRANSPARENT_PROXY" //透明代理
+	Heartbeat        TaskType = "HEARTBEAT"         //心跳
 )
 
 const (
-	BruteForce          = 1
-	FILE_Monit          = 2
-	Command_Monit       = 3
-	Process_Monit       = 4
-	Network_Monit       = 5
-	WebShell            = 6
-	BaseLine            = 7
-	AppLog              = 8
-	Audit               = 9
-	Asset               = 10
-	Rebound_Shell_Event = 11
+	FILE_BAIT BaitType = "FILE_BAIT" //协议
+	HIS_BAIT  BaitType = "HIS_BAIT"  //密签
+
 )
 
-type Plugin struct {
-	Modname    string `json:"modname"`
-	Enable     string `json:"enable"`
-	Updatetime string `json:"updatetime"`
-	Data       string `json:"data"`
+//公共状态定义
+const (
+	IDLE    TaskStatus = -1 //初始
+	RUNNING TaskStatus = 1  //下发中
+	FAILED  TaskStatus = 2  //异常
+	SUCCESS TaskStatus = 3  //成功
+)
+
+const (
+	DEPLOY   OperatorType = "DEPLOY"   //部署
+	WITHDRAW OperatorType = "WITHDRAW" //撤回
+)
+
+type TaskPayload struct {
+	TaskID       string       `json:"TaskID"`
+	Status       TaskStatus   `json:"Status"`
+	AgentID      string       `json:"AgentID"`
+	TaskType     TaskType     `json:"TaskType"`
+	OperatorType OperatorType `json:"OperatorType"`
 }
 
-type Policy struct {
-	Agentid  string   `json:"agentid"`
-	Policyid string   `json:"policyid"`
-	Md5sum   string   `json:"md5sum"`
-	Plugins  []Plugin `json:"plugins"`
+//协议部署
+type FileDeployTaskPayload struct {
+	TaskPayload
+	FileMD5           string            `json:"FileMD5"`
+	CommandParameters map[string]string `json:"CommandParameters"`
+	URL               string            `json:"URL"`
+}
+
+type BaitStrategy struct {
+	TaskPayload
+	BaitType BaitType `json:"BaitType"`
+}
+
+//诱饵密签文件部署 撤回
+type FileBaitDeployTaskPayload struct {
+	BaitStrategy
+	FileMD5           string            `json:"FileMD5"`
+	CommandParameters map[string]string `json:"CommandParameters"`
+	URL               string            `json:"URL"`
+}
+
+//history诱饵部署
+type HistoryBaitDeployTaskPayload struct {
+	BaitStrategy
+	BashHistoryPath string `json:"BashHistoryPath"`
+	RandomLine      string `json:"RandomLine"`
+	HisBaitItem     []HisBaitItem
+}
+
+//协议代理部署 撤回  TODO 要加类型ProxyType  http/telnet..
+type ProtocolProxyTaskPayload struct {
+	ProxyStrategy
+	HoneypotPort int32  `json:"HoneypotPort"`
+	HoneypotIP   string `json:"HoneypotIP"`
+	DeployPath   string `json:"DeployPath"`
+	SecCenter    string `json:"SecCenter"`
+}
+
+type ProxyStrategy struct {
+	TaskPayload
+	ProxyPort int32  `json:"ProxyPort"`
+	ProxyType string `json:"ProxyType"`
+	ProcessId int
+}
+
+type AllProxyStrategy struct {
+	ProxyStrategy
+	HoneypotServerPort int32  `json:"HoneypotServerPort"`
+	HoneypotServerIP   string `json:"HoneypotServerIP"`
+	ProbeIP            string `json:"ProbeIP"`
+	HoneypotPort       int32  `json:"HoneypotPort"`
+	HoneypotIP         string `json:"HoneypotIP"`
+	DeployPath         string `json:"DeployPath"`
+	SecCenter          string `json:"SecCenter"`
+}
+
+//透明代理部署 撤回
+type TransparentProxyTaskPayload struct {
+	ProxyStrategy
+	HoneypotServerPort int32  `json:"HoneypotServerPort"`
+	HoneypotServerIP   string `json:"HoneypotServerIP"`
+	ProbeIP            string `json:"ProbeIP"`
+}
+
+type ProtocolProxyStrategy struct {
+	TaskID       string `json:"TaskID"`
+	Status       int32  `json:"Status"`
+	AgentID      string `json:"AgentID"`
+	TaskType     string `json:"TaskType"`
+	OperatorType string `json:"OperatorType"`
+	ProxyPort    int32  `json:"ProxyPort"`
+	HoneypotPort int32  `json:"HoneypotPort"`
+	HoneypotIP   string `json:"HoneypotIP"`
+	DeployPath   string `json:"DeployPath"`
+}
+
+// 透明代理连接事件
+type ConnectEvent struct {
+	AgentId    string
+	SourceAddr string
+	BindPort   int32
+	ExportPort int
+	DestAddr   string
+	DestPort   int32
+	EventTime  int64
+	ProxyType  string
 }
 
 //go get golang.org/x/sys/unix
@@ -128,66 +226,6 @@ func LoadFileForObj(filename string, itf interface{}) (interface{}, bool) {
 	return nil, false
 }
 
-func DeepFields(ifaceType reflect.Type) []reflect.StructField {
-	var fields []reflect.StructField
-
-	for i := 0; i < ifaceType.NumField(); i++ {
-		v := ifaceType.Field(i)
-		if v.Anonymous && v.Type.Kind() == reflect.Struct {
-			fields = append(fields, DeepFields(v.Type)...)
-		} else {
-			fields = append(fields, v)
-		}
-	}
-
-	return fields
-}
-
-func StructCopy(DstStructPtr interface{}, SrcStructPtr interface{}) {
-	srcv := reflect.ValueOf(SrcStructPtr)
-	dstv := reflect.ValueOf(DstStructPtr)
-	srct := reflect.TypeOf(SrcStructPtr)
-	dstt := reflect.TypeOf(DstStructPtr)
-	if srct.Kind() != reflect.Ptr || dstt.Kind() != reflect.Ptr ||
-		srct.Elem().Kind() == reflect.Ptr || dstt.Elem().Kind() == reflect.Ptr {
-		panic("Fatal error:type of parameters must be Ptr of value")
-	}
-	if srcv.IsNil() || dstv.IsNil() {
-		panic("Fatal error:value of parameters should not be nil")
-	}
-	srcV := srcv.Elem()
-	dstV := dstv.Elem()
-	srcfields := DeepFields(reflect.ValueOf(SrcStructPtr).Elem().Type())
-	for _, v := range srcfields {
-		if v.Anonymous {
-			continue
-		}
-		dst := dstV.FieldByName(v.Name)
-		src := srcV.FieldByName(v.Name)
-		if !dst.IsValid() {
-			continue
-		}
-		if src.Type() == dst.Type() && dst.CanSet() {
-			dst.Set(src)
-			continue
-		}
-		if src.Kind() == reflect.Ptr && !src.IsNil() && src.Type().Elem() == dst.Type() {
-			dst.Set(src.Elem())
-			continue
-		}
-		if dst.Kind() == reflect.Ptr && dst.Type().Elem() == src.Type() {
-			dst.Set(reflect.New(src.Type()))
-			dst.Elem().Set(src)
-			continue
-		}
-	}
-	return
-}
-
-func CopyString(s string) string {
-	return string([]byte(s))
-}
-
 var (
 	lock       sync.Mutex
 	isInit     bool
@@ -219,8 +257,8 @@ func ReadFile(filePath string) (bool, string) {
 	return true, string(context[0:readCount])
 }
 
-func ReadProxyTable() (bool, map[string]ProxyStrategy) {
-	var proxyTable map[string]ProxyStrategy
+func ReadAllProxyTable() (bool, map[string]AllProxyStrategy) {
+	var proxyTable map[string]AllProxyStrategy
 	proxyTablePath := AgentHome() + "/proxy/proxy-table.json"
 	if Exists(proxyTablePath) == false {
 		logger.Info("file %s not exists, create!", proxyTablePath)
@@ -399,6 +437,15 @@ func SendMsg(msgID int32, evetmsg string, commAddr string) error {
 	return nil
 }
 
+type HeartBeat struct {
+	AgentId  string
+	Status   string // 表示当前agent 状态
+	Version  string // 为之后升级
+	IPs      string
+	HostName string
+	Type     string
+}
+
 func doSend(msg []Msg) {
 	m := make(map[string][]*Msg)
 	for _, v := range msg {
@@ -432,67 +479,6 @@ func doSend(msg []Msg) {
 	}
 }
 
-func Daemon(nochdir, noclose int) int {
-	var ret, ret2 uintptr
-	var err syscall.Errno
-
-	darwin := runtime.GOOS == "darwin"
-
-	// already a daemon
-	if syscall.Getppid() == 1 {
-		return 0
-	}
-
-	// fork off the parent process
-	ret, ret2, err = syscall.RawSyscall(syscall.SYS_FORK, 0, 0, 0)
-	if err != 0 {
-		return -1
-	}
-
-	// failure
-	if ret2 < 0 {
-		os.Exit(-1)
-	}
-
-	// handle exception for darwin
-	if darwin && ret2 == 1 {
-		ret = 0
-	}
-
-	// if we got a good PID, then we call exit the parent process.
-	if ret > 0 {
-		os.Exit(0)
-	}
-
-	/* Change the file mode mask */
-	_ = syscall.Umask(0)
-
-	// create a new SID for the child process
-	s_ret, s_errno := syscall.Setsid()
-	if s_errno != nil {
-		log.Printf("Error: syscall.Setsid errno: %d", s_errno)
-	}
-	if s_ret < 0 {
-		return -1
-	}
-
-	if nochdir == 0 {
-		os.Chdir("/")
-	}
-
-	if noclose == 0 {
-		f, e := os.OpenFile("/dev/null", os.O_RDWR, 0)
-		if e == nil {
-			fd := f.Fd()
-			syscall.Dup2(int(fd), int(os.Stdin.Fd()))
-			syscall.Dup2(int(fd), int(os.Stdout.Fd()))
-			syscall.Dup2(int(fd), int(os.Stderr.Fd()))
-		}
-	}
-
-	return 0
-}
-
 type EngineStrategyResp struct {
 	Code int
 	Msg  string
@@ -509,19 +495,6 @@ type Pid struct {
 	Id     int
 	Result string
 	Mode   string
-}
-
-type ProxyStrategy struct {
-	BasePolicy
-
-	ListenPort int
-	ServerType string
-	HoneyIP    string
-	HoneyPort  int
-	Pid        int    // hosteye agent 自有
-	Path       string // 中继代理才有
-	Date       string
-	SecCenter  string
 }
 
 /*

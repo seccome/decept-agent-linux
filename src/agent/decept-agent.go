@@ -42,7 +42,7 @@ var (
 	HostScanEnable   bool
 	StartMode        string
 	SpecifyIP        string
-	AgentHeartBeat   HeartBeat
+	AgentHeartBeat   comm.HeartBeat
 )
 
 func main() {
@@ -504,7 +504,7 @@ func getAgentId() (error, string) {
 	return nil, agentid
 }
 
-func sentHeartBeat(beat HeartBeat, client *comm.RedisServer, pool *redis.Pool) bool {
+func sentHeartBeat(beat comm.HeartBeat, client *comm.RedisServer, pool *redis.Pool) bool {
 
 	conn := pool.Get()
 
@@ -527,15 +527,6 @@ func sentHeartBeat(beat HeartBeat, client *comm.RedisServer, pool *redis.Pool) b
 
 	return true
 
-}
-
-type HeartBeat struct {
-	AgentId  string
-	Status   string // 表示当前agent 状态
-	Version  string // 为之后升级
-	IPs      string
-	HostName string
-	Type     string
 }
 
 func getIp() (string, error) {

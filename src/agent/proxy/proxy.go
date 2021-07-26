@@ -19,8 +19,8 @@ var (
 	Proxy            = "/proxy/tcpProxy"
 	ProxyLogConfPath = fmt.Sprintf("%s%s", AgentHome, "/proxy/conf/log.json")
 	AgentConf        comm.AgentConf
-	ProxySubChannel  = "proxy-strategy-sub-channel"
-	ProxyPubChannel  = "proxy-strategy-pub-channel"
+	ProxySubChannel  = comm.AgentTaskRequestChannel
+	ProxyPubChannel  = comm.AgentTaskResponseChannel
 	ProxyTablePath   = AgentHome + "/proxy/proxy-table.json"
 	TimeFormat       = "2006-01-02 15:04:05"
 )
@@ -35,13 +35,15 @@ var (
 func main() {
 
 	err := logger.SetLogger(ProxyLogConfPath)
-
+	agentId := comm.QueryEngineId()
 	if err != nil {
 		// TODO 文件夹错误或读取异常
 		logger.Error("logger setting err: ", err)
 	}
 	AgentConf = comm.LoadAgentConf(AgentHome)
-	comm.ReadProxyTable() // 触发proxy-table.json 创建
+
+	//comm.ReadProxyTable() // 触发proxy-table.json 创建
+
 	go comm.MonitForKillSelfTask()
 
 	go comm.StartMemCpuMonitor("proxy", 5)
@@ -76,17 +78,31 @@ func main() {
 				continue
 			}
 
-			var proxyStrategy comm.ProxyStrategy
+			var taskPayload comm.TaskPayload
 
-			err = json.Unmarshal(data, &proxyStrategy)
+			err = json.Unmarshal(data, &taskPayload)
 
 			if err != nil {
 				logger.Error(err)
 			}
-			proxyStrategy.Date = time.Now().Format(TimeFormat)
-			agentId := comm.QueryEngineId()
-			if agentId == proxyStrategy.AgentId {
-				handleProxyAndCallback(proxyStrategy, client, pool)
+
+			if taskPayload.AgentID != agentId {
+				continue
+			}
+
+			var allProxyTaskPayload comm.AllProxyStrategy
+
+			err = json.Unmarshal(data, &allProxyTaskPayload)
+
+			if err != nil {
+				logger.Error(err)
+			}
+			if taskPayload.TaskType == comm.ProtocolProxy {
+
+				handleProtocolProxy(allProxyTaskPayload, client, pool)
+			} else if taskPayload.TaskType == comm.TransparentProxy {
+
+				handleTransparentProxy(allProxyTaskPayload, client, pool)
 			}
 		}
 	}
@@ -98,7 +114,7 @@ func zombieProcessClean() {
 
 		time.Sleep(time.Second * 200)
 
-		ok, proxyTable := comm.ReadProxyTable()
+		ok, proxyTable := comm.ReadAllProxyTable()
 
 		if !ok {
 			logger.Error("read file proxy-table error")
@@ -106,12 +122,12 @@ func zombieProcessClean() {
 		}
 
 		for _, proxyStrategy := range proxyTable {
-			if comm.IsZombie(proxyStrategy.Pid) {
-				pp, err := os.FindProcess(proxyStrategy.Pid)
+			if comm.IsZombie(proxyStrategy.ProcessId) {
+				pp, err := os.FindProcess(proxyStrategy.ProcessId)
 				if err == nil && pp != nil {
 					err = comm.KillProcess(pp)
 					if err != nil {
-						logger.Error("signal %v error", proxyStrategy.Pid, err)
+						logger.Error("signal %v error", proxyStrategy.ProcessId, err)
 						break
 					}
 				}
@@ -120,40 +136,36 @@ func zombieProcessClean() {
 	}
 }
 
-func ipSelect(proxyStrategy comm.ProxyStrategy) string {
+func ipSelect(ips string) string {
 	if AgentConf.HoneyPublicIp != "" && comm.IsIpConnect(AgentConf.HoneyPublicIp) {
 		return AgentConf.HoneyPublicIp // 透明代理一般只代理到蜜网
 	}
-	if strings.Index(proxyStrategy.HoneyIP, ",") > -1 {
-		ipList := strings.Split(proxyStrategy.HoneyIP, ",")
+	if strings.Index(ips, ",") > -1 {
+		ipList := strings.Split(ips, ",")
 		for _, ip := range ipList {
 			if comm.IsIpConnect(ip) {
 				return ip
 			}
 		}
-	} else {
-		if comm.IsIpConnect(proxyStrategy.HoneyIP) {
-			return proxyStrategy.HoneyIP // honeyIp 可用不用替换
-		}
 	}
-
-	return proxyStrategy.HoneyIP
+	comm.IsIpConnect(ips)
+	return ips
 }
 
-func handleProxyAndCallback(proxyStrategy comm.ProxyStrategy, redisClient *comm.RedisServer, pool *redis.Pool) {
+func handleProtocolProxy(protocolProxyTaskPayload comm.AllProxyStrategy, redisClient *comm.RedisServer, pool *redis.Pool) {
 
-	ok1, proxyTable := comm.ReadProxyTable()
+	ok1, proxyTable := comm.ReadAllProxyTable()
 	ok2, processTable := comm.ReadProcessTable()
 
 	if !ok1 || !ok2 {
 		logger.Error("read proxy-table [%v] process-table [%v], quit handle", ok1, ok2)
 		return
 	}
-	proxyCheckOk := checkProxyStrategy(proxyStrategy)
-	if !proxyCheckOk {
-		logger.Error("proxy port: %d occupied, or to big abort!", proxyStrategy.ListenPort)
-		proxyStrategy.Status = -1 // 0 -> 出错
-		result, err := json.Marshal(proxyStrategy)
+
+	if protocolProxyTaskPayload.OperatorType == comm.DEPLOY && !portCheck(protocolProxyTaskPayload.ProxyPort) {
+		logger.Error("proxy port: %d occupied, or to big abort!", protocolProxyTaskPayload.ProxyPort)
+		protocolProxyTaskPayload.Status = comm.FAILED
+		result, err := json.Marshal(protocolProxyTaskPayload)
 		if err != nil {
 			logger.Error("marshal proxy strategy err %v, %v", err, result)
 		}
@@ -163,24 +175,109 @@ func handleProxyAndCallback(proxyStrategy comm.ProxyStrategy, redisClient *comm.
 		return
 	}
 
-	proxyStrategy.HoneyIP = ipSelect(proxyStrategy)
+	key := fmt.Sprintf("%s-%d", protocolProxyTaskPayload.ProxyType, protocolProxyTaskPayload.ProxyPort)
+	logger.Info("proxy-key[%s] proxy for honeypot [%s:%d]", key, protocolProxyTaskPayload.HoneypotIP, protocolProxyTaskPayload.HoneypotPort)
+	defer func() {
+		if protocolProxyTaskPayload.Status == comm.SUCCESS {
+			logger.Info("proxy [%v] exec success", protocolProxyTaskPayload)
+		} else if protocolProxyTaskPayload.Status == comm.FAILED {
+			logger.Info("proxy [%v] exec fail", protocolProxyTaskPayload)
+		}
+	}()
 
-	if strings.Index(proxyStrategy.HoneyIP, ",") > -1 {
-		ips := strings.Split(proxyStrategy.HoneyIP, ",")
-		logger.Warn("ips: [%v], chose first ip: %s", ips, ips[0])
-		proxyStrategy.HoneyIP = ips[0]
+	if protocolProxyTaskPayload.OperatorType == comm.WITHDRAW {
+		logger.Info("start kill proxy [%s] pid [%d]", protocolProxyTaskPayload.ProxyType, protocolProxyTaskPayload.ProcessId)
+		queryPid, ok := processTable[key]
+		if ok {
+			err := queryPid.KillSelf()
+			if err != nil {
+				logger.Info("kill process: %s err: %v", queryPid, err)
+				protocolProxyTaskPayload.Status = comm.FAILED
+			}
+		}
+		delete(processTable, key)
+		delete(proxyTable, key)
+		logger.Info("proxy [%s] pid [%d] kill success! ", protocolProxyTaskPayload.ProxyType, protocolProxyTaskPayload.ProcessId)
+		protocolProxyTaskPayload.Status = comm.SUCCESS
+	} else if protocolProxyTaskPayload.OperatorType == comm.DEPLOY {
+		var startedProxyPid comm.Pid
+		var err error
+		var startCmd string
+		var startMode string
+		startCmd = fmt.Sprintf("%s -backend %s:%d -bind :%d -seccenter %s", protocolProxyTaskPayload.DeployPath, protocolProxyTaskPayload.HoneypotIP, protocolProxyTaskPayload.HoneypotPort, protocolProxyTaskPayload.ProxyPort, protocolProxyTaskPayload.SecCenter)
+		startMode = "bash"
+
+		if comm.Exists(protocolProxyTaskPayload.DeployPath) == false {
+			err = errors.New("file not exist")
+		} else {
+			startedProxyPid, err = comm.StartProject(startCmd, startMode, key)
+			logger.Info(startedProxyPid)
+		}
+		if err != nil {
+			logger.Error("start proxy err: %v", err)
+			protocolProxyTaskPayload.Status = comm.FAILED // 0 -> 出错
+		} else {
+			protocolProxyTaskPayload.ProcessId = startedProxyPid.Id
+			protocolProxyTaskPayload.Status = comm.SUCCESS // 0 -> 出错
+		}
+		proxyTable[key] = protocolProxyTaskPayload
+	} else {
+		logger.Warn("unknown type of proxy strategy [%v]", protocolProxyTaskPayload)
+	}
+	logger.Info("current proxy-table: %v", proxyTable)
+	comm.FlushData2File(proxyTable, ProxyTablePath)
+	result, err := json.Marshal(protocolProxyTaskPayload)
+	if err != nil {
+		logger.Error("marshal proxy strategy err %v, %v", err, result)
+	}
+	encodedData := base64.StdEncoding.EncodeToString(result)
+
+	redisClient.PublishMsg(pool, ProxyPubChannel, encodedData)
+
+	logger.Info("publish message result: %s", result)
+}
+
+func handleTransparentProxy(transparentProxy comm.AllProxyStrategy, redisClient *comm.RedisServer, pool *redis.Pool) {
+
+	ok1, proxyTable := comm.ReadAllProxyTable()
+	ok2, processTable := comm.ReadProcessTable()
+
+	if !ok1 || !ok2 {
+		logger.Error("read proxy-table [%v] process-table [%v], quit handle", ok1, ok2)
+		return
 	}
 
-	key := fmt.Sprintf("%s-%d", proxyStrategy.ServerType, proxyStrategy.ListenPort)
-	logger.Info("proxy-key[%s]", key)
-	logger.Info("HoneyIP[%s]", proxyStrategy.HoneyIP)
-	defer func() {
-		if proxyStrategy.Status == 1 {
-			logger.Info("proxy [%v] exec success", proxyStrategy)
-		} else if proxyStrategy.Status == -1 {
-			logger.Info("proxy [%v] exec fail", proxyStrategy)
+	proxyCheckOk := portCheck(transparentProxy.ProxyPort)
+	if !proxyCheckOk {
+		logger.Error("proxy port: %d occupied, or to big abort!", transparentProxy.ProxyPort)
+		transparentProxy.Status = comm.FAILED // 0 -> 出错
+		result, err := json.Marshal(transparentProxy)
+		if err != nil {
+			logger.Error("marshal proxy strategy err %v, %v", err, result)
 		}
-		_, proxyTable1 := comm.ReadProxyTable()
+		encodedData := base64.StdEncoding.EncodeToString(result)
+		redisClient.PublishMsg(pool, ProxyPubChannel, encodedData)
+		logger.Info("publish message result: %s", result)
+		return
+	}
+
+	transparentProxy.HoneypotServerIP = ipSelect(transparentProxy.HoneypotServerIP)
+
+	if strings.Index(transparentProxy.HoneypotServerIP, ",") > -1 {
+		ips := strings.Split(transparentProxy.HoneypotServerIP, ",")
+		logger.Warn("ips: [%v], chose first ip: %s", ips, ips[0])
+		transparentProxy.HoneypotServerIP = ips[0]
+	}
+
+	key := fmt.Sprintf("%s-%d", transparentProxy.ProxyType, transparentProxy.ProxyPort)
+	logger.Info("start transparent proxy [%s]", key)
+	defer func() {
+		if transparentProxy.Status == comm.SUCCESS {
+			logger.Info("proxy [%v] exec success", transparentProxy)
+		} else if transparentProxy.Status == comm.FAILED {
+			logger.Info("proxy [%v] exec fail", transparentProxy)
+		}
+		_, proxyTable1 := comm.ReadAllProxyTable()
 		logger.Info("----------------------------------------------------------------------")
 		logger.Info(proxyTable1)
 		logger.Info("----------------------------------------------------------------------")
@@ -196,52 +293,41 @@ func handleProxyAndCallback(proxyStrategy comm.ProxyStrategy, redisClient *comm.
 		}
 	}
 
-	if proxyStrategy.Type == "UN_EDGE" || proxyStrategy.Type == "UN_RELAY" {
-		logger.Info("start kill proxy [%s] pid [%d]", proxyStrategy.ServerType, proxyStrategy.Pid)
+	if transparentProxy.OperatorType == comm.WITHDRAW {
+		logger.Info("start kill proxy [%s] pid [%d]", key, transparentProxy.ProcessId)
 		queryPid, ok := processTable[key]
 		if ok {
 			err := queryPid.KillSelf()
 			if err != nil {
 				logger.Info("kill process: %s err: %v", queryPid, err)
-				proxyStrategy.Status = -1
+				transparentProxy.Status = comm.FAILED
 			}
 		}
 		delete(processTable, key)
 		delete(proxyTable, key)
-		logger.Info(" proxy [%s] pid [%d] kill success! ", proxyStrategy.ServerType, proxyStrategy.Pid)
-		proxyStrategy.Status = 1
-	} else if proxyStrategy.Status == 1 {
+		logger.Info(" proxy [%s] pid [%d] kill success! ", transparentProxy.ProxyType, transparentProxy.ProcessId)
+		transparentProxy.Status = comm.SUCCESS
+	} else if transparentProxy.OperatorType == comm.DEPLOY {
 		var startedProxyPid comm.Pid
 		var err error
 		var startCmd string
-		var startMode string
-		if proxyStrategy.Type == "EDGE" { // 起边缘代理
-			startCmd = AgentHome + Proxy
-		} else if proxyStrategy.Type == "RELAY" { // 起中继代理
-			startCmd = fmt.Sprintf("%s -backend %s:%d -bind :%d -seccenter %s", proxyStrategy.Path, proxyStrategy.HoneyIP, proxyStrategy.HoneyPort, proxyStrategy.ListenPort, proxyStrategy.SecCenter)
-			startMode = "bash"
-		}
-
-		if proxyStrategy.Type == "RELAY" && comm.Exists(proxyStrategy.Path) == false {
-			err = errors.New("file not exist")
-		} else {
-			startedProxyPid, err = comm.StartProject(startCmd, startMode, key)
-		}
+		startCmd = AgentHome + Proxy
+		startedProxyPid, err = comm.StartProject(startCmd, "", key)
 		logger.Info(startedProxyPid)
 		if err != nil {
 			logger.Error("start proxy err: %v", err)
-			proxyStrategy.Status = -1 // 0 -> 出错
+			transparentProxy.Status = comm.FAILED // 0 -> 出错
 		} else {
-			proxyStrategy.Pid = startedProxyPid.Id
-			proxyStrategy.Status = 1 // 1 -> 成功
+			transparentProxy.ProcessId = startedProxyPid.Id
+			transparentProxy.Status = comm.SUCCESS // 1 -> 成功
 		}
-		proxyTable[key] = proxyStrategy
+		proxyTable[key] = transparentProxy
 	} else {
-		logger.Warn("unknown type of proxy strategy [%v]", proxyStrategy)
+		logger.Warn("unknown type of transparent proxy strategy [%v]", transparentProxy)
 	}
 	logger.Info("current proxy-table: %v", proxyTable)
 	comm.FlushData2File(proxyTable, ProxyTablePath)
-	result, err := json.Marshal(proxyStrategy)
+	result, err := json.Marshal(transparentProxy)
 	if err != nil {
 		logger.Error("marshal proxy strategy err %v, %v", err, result)
 	}
@@ -253,18 +339,15 @@ func handleProxyAndCallback(proxyStrategy comm.ProxyStrategy, redisClient *comm.
 	logger.Info("publish message result: %s", result)
 }
 
-func checkProxyStrategy(proxyStrategy comm.ProxyStrategy) bool {
+func portCheck(port int32) bool {
 
-	if proxyStrategy.Type == "EDGE" || proxyStrategy.Type == "RELAY" {
-		logger.Info("new proxy try listen port : %v", proxyStrategy.ListenPort)
-		if proxyStrategy.ListenPort > 65535 {
-			logger.Error("Too large port %d, abort!", proxyStrategy.ListenPort)
-		}
-		portOccupied := comm.CheckPort(fmt.Sprintf("%d", proxyStrategy.ListenPort))
-		if portOccupied {
-			logger.Error("proxy port: %d occupied!", proxyStrategy.ListenPort)
-			return false
-		}
+	if port > 65535 {
+		logger.Error("Too large port %d, abort!", port)
+	}
+	portOccupied := comm.CheckPort(fmt.Sprintf("%d", port))
+	if portOccupied {
+		logger.Error("proxy port: %d occupied!", port)
+		return false
 	}
 
 	return true

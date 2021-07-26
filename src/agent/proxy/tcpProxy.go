@@ -20,7 +20,7 @@ import (
 
 var (
 	AgentHomeDir      = comm.AgentHome()
-	ProxyStrategy     comm.ProxyStrategy
+	ProxyStrategy     comm.AllProxyStrategy
 	ProxyEventChannel = "proxy-event-pub-channel"
 )
 
@@ -45,7 +45,7 @@ func main() {
 		logger.Fatal(err)
 	}
 
-	ok, proxyTable := comm.ReadProxyTable()
+	ok, proxyTable := comm.ReadAllProxyTable()
 
 	if !ok {
 		logger.Error("read file proxy-table error")
@@ -65,9 +65,9 @@ func main() {
 
 	var proxyName string
 
-	for key, pid := range proxyTable {
-		if pid.Pid == thisPid {
-			ProxyStrategy = pid
+	for key, proxy := range proxyTable {
+		if proxy.ProcessId == thisPid {
+			ProxyStrategy = proxy
 			proxyName = key
 		}
 	}
@@ -81,16 +81,16 @@ func main() {
 
 	flag.Parse()
 
-	bind := fmt.Sprintf("0.0.0.0:%d", ProxyStrategy.ListenPort)
+	bind := fmt.Sprintf("0.0.0.0:%d", ProxyStrategy.ProxyPort)
 	logger.Info("proxy addr %s", bind)
 
-	portBind := comm.CheckPort(fmt.Sprintf("%d", ProxyStrategy.ListenPort))
+	portBind := comm.CheckPort(fmt.Sprintf("%d", ProxyStrategy.ProxyPort))
 	if portBind {
-		logger.Error("port: %d occupied, abort!", ProxyStrategy.ListenPort)
-		log.Fatalf("port: %d occupied", ProxyStrategy.ListenPort)
+		logger.Error("port: %d occupied, abort!", ProxyStrategy.ProxyPort)
+		log.Fatalf("port: %d occupied", ProxyStrategy.ProxyPort)
 	}
 
-	backend := fmt.Sprintf("%s:%d", ProxyStrategy.HoneyIP, ProxyStrategy.HoneyPort)
+	backend := fmt.Sprintf("%s:%d", ProxyStrategy.HoneypotServerIP, ProxyStrategy.HoneypotServerPort)
 	logger.Info("honey addr %s", backend)
 
 	ln, err := net.Listen("tcp", bind)
@@ -125,12 +125,12 @@ func proxy(ln net.Listener, backend string) error {
 func reportConnectEvent(conn net.Conn, removeCon net.Conn) {
 	remoteParts := strings.Split(removeCon.LocalAddr().String(), ":")
 	ePort, _ := strconv.Atoi(remoteParts[1])
-	connectEvent := ConnectEvent{
+	connectEvent := comm.ConnectEvent{
 		AgentId:    comm.QueryEngineId(),
 		SourceAddr: conn.RemoteAddr().String(),
-		BindPort:   ProxyStrategy.ListenPort,
-		DestAddr:   ProxyStrategy.HoneyIP,
-		DestPort:   ProxyStrategy.HoneyPort,
+		BindPort:   ProxyStrategy.ProxyPort,
+		DestAddr:   ProxyStrategy.HoneypotServerIP,
+		DestPort:   ProxyStrategy.HoneypotServerPort,
 		EventTime:  time.Now().Unix(),
 		ProxyType:  "EDGE",
 		ExportPort: ePort,
@@ -176,17 +176,6 @@ func handle(localConn net.Conn, backend string) {
 	defer remoteConn.Close()
 
 	copy(localConn, remoteConn)
-}
-
-type ConnectEvent struct {
-	AgentId    string
-	SourceAddr string
-	BindPort   int
-	ExportPort int
-	DestAddr   string
-	DestPort   int
-	EventTime  int64
-	ProxyType  string
 }
 
 func copy(localConn, remoteConn io.ReadWriter) {
